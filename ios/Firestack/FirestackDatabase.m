@@ -21,6 +21,7 @@
 @property FIRDatabaseHandle childRemovedHandler;
 @property FIRDatabaseHandle childMovedHandler;
 @property FIRDatabaseHandle childValueHandler;
++ (NSDictionary *) snapshotToDict:(FIRDataSnapshot *) snapshot;
 @end
 
 @implementation FirestackDBReference
@@ -46,7 +47,7 @@
 {
     if (![self isListeningTo:eventName]) {
         id withBlock = ^(FIRDataSnapshot * _Nonnull snapshot) {
-            NSDictionary *props = [self snapshotToDict:snapshot];
+            NSDictionary *props = [FirestackDBReference snapshotToDict:snapshot];
             [self sendJSEvent:DATABASE_DATA_EVENT
                         title:eventName
                         props: @{
@@ -74,7 +75,7 @@
 {
     [_query observeSingleEventOfType:FIRDataEventTypeValue
                            withBlock:^(FIRDataSnapshot * _Nonnull snapshot) {
-                               NSDictionary *props = [self snapshotToDict:snapshot];
+                               NSDictionary *props = [FirestackDBReference snapshotToDict:snapshot];
                                callback(@[[NSNull null], @{
                                               @"eventName": @"value",
                                               @"path": _path,
@@ -131,7 +132,7 @@
     [self unsetListeningOn:name];
 }
 
-- (NSDictionary *) snapshotToDict:(FIRDataSnapshot *) snapshot
++ (NSDictionary *) snapshotToDict:(FIRDataSnapshot *) snapshot
 {
     NSMutableDictionary *dict = [[NSMutableDictionary alloc] init];
     [dict setValue:snapshot.key forKey:@"key"];
@@ -468,7 +469,58 @@ RCT_EXPORT_METHOD(push:(NSString *) path
     }
 }
 
+RCT_EXPORT_METHOD(beginTransaction:(NSString *) path
+                  withIdentifier:(NSString *) identifier
+                  applyLocally:(NSString *) applyLocally
+                  onComplete:(RCTResponseSenderBlock) onComplete)
+{
+    NSMutableDictionary *transactionState = [NSMutableDictionary new];
+    [_transactions setValue:transactionState forKey:identifier];
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    [transactionState setObject:sema forKey:@"semaphore"];
+    
+    FIRDatabaseReference *ref = [self getPathRef:path];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [ref runTransactionBlock:^FIRTransactionResult * _Nonnull(FIRMutableData * _Nonnull currentData) {
+            [self sendEventWithName:DATABASE_TRANSACTION_EVENT
+                               body:@{
+                                      @"id": identifier,
+                                      @"originalValue": currentData.value
+                                      }];
+            // Wait for the event handler to call tryCommitTransaction
+            dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+            BOOL abort = [transactionState valueForKey:@"abort"];
+            id value = [transactionState valueForKey:@"value"];
+            [_transactions removeObjectForKey:identifier];
+            if (abort) {
+                return [FIRTransactionResult abort];
+            } else {
+                currentData.value = value;
+                return [FIRTransactionResult successWithValue:currentData];
+            }
+        } andCompletionBlock:^(NSError * _Nullable error, BOOL committed, FIRDataSnapshot * _Nullable snapshot) {
+            [self handleCallback:@"transaction" callback:onComplete databaseError:error];
+        }];
+    });
+}
 
+RCT_EXPORT_METHOD(tryCommitTransaction:(NSString *) identifier
+                  withData:(NSDictionary *) data
+                  orAbort:(BOOL) abort)
+{
+    NSMutableDictionary *transactionState = [_transactions valueForKey:identifier];
+    if (!transactionState) {
+        NSLog(@"tryCommitTransaction for unknown ID %@", identifier);
+    }
+    dispatch_semaphore_t sema = [transactionState valueForKey:@"semaphore"];
+    if (abort) {
+        [transactionState setValue:@true forKey:@"abort"];
+    } else {
+        id newValue = [data valueForKey:@"value"];
+        [transactionState setValue:newValue forKey:@"value"];
+    }
+    dispatch_semaphore_signal(sema);
+}
 
 RCT_EXPORT_METHOD(on:(NSString *) path
                   modifiersString:(NSString *) modifiersString
@@ -623,7 +675,7 @@ RCT_EXPORT_METHOD(goOnline)
 
 // Not sure how to get away from this... yet
 - (NSArray<NSString *> *)supportedEvents {
-    return @[DATABASE_DATA_EVENT, DATABASE_ERROR_EVENT];
+    return @[DATABASE_DATA_EVENT, DATABASE_ERROR_EVENT, DATABASE_TRANSACTION_EVENT];
 }
 
 
