@@ -52,6 +52,14 @@ firestack.database()
   .transaction((title) => 'My Awesome Post');
 ```
 
+Test value exists at location:
+```javascript
+firestack.database()
+  .ref('posts/1234')
+  .exists();
+```
+
+
 ## Unmounted components
 
 Listening to database updates on unmounted components will trigger a warning:
