@@ -43,6 +43,7 @@ firestack.database()
     const exists = snapshot.exists();
   });
 ```
+
 Basic write with priority example:
 ```javascript
 firestack.database()
@@ -53,6 +54,14 @@ firestack.database()
   }, 10);
 ```
 Useful for `orderByPriority` queries.
+
+=======
+Transaction Support:
+```javascript
+firestack.database()
+  .ref('posts/1234/title')
+  .transaction((title) => 'My Awesome Post');
+```
 
 
 ## Unmounted components

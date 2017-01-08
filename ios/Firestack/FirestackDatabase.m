@@ -21,6 +21,8 @@
 @property FIRDatabaseHandle childRemovedHandler;
 @property FIRDatabaseHandle childMovedHandler;
 @property FIRDatabaseHandle childValueHandler;
++ (NSDictionary *) snapshotToDict:(FIRDataSnapshot *) snapshot;
+
 @end
 
 @implementation FirestackDBReference
@@ -46,7 +48,7 @@
 {
     if (![self isListeningTo:eventName]) {
         id withBlock = ^(FIRDataSnapshot * _Nonnull snapshot) {
-            NSDictionary *props = [self snapshotToDict:snapshot];
+            NSDictionary *props = [FirestackDBReference snapshotToDict:snapshot];
             [self sendJSEvent:DATABASE_DATA_EVENT
                         title:eventName
                         props: @{
@@ -74,7 +76,7 @@
 {
     [_query observeSingleEventOfType:FIRDataEventTypeValue
                            withBlock:^(FIRDataSnapshot * _Nonnull snapshot) {
-                               NSDictionary *props = [self snapshotToDict:snapshot];
+                               NSDictionary *props = [FirestackDBReference snapshotToDict:snapshot];
                                callback(@[[NSNull null], @{
                                               @"eventName": @"value",
                                               @"path": _path,
@@ -131,7 +133,7 @@
     [self unsetListeningOn:name];
 }
 
-- (NSDictionary *) snapshotToDict:(FIRDataSnapshot *) snapshot
++ (NSDictionary *) snapshotToDict:(FIRDataSnapshot *) snapshot
 {
     NSMutableDictionary *dict = [[NSMutableDictionary alloc] init];
     [dict setValue:snapshot.key forKey:@"key"];
@@ -366,6 +368,8 @@ RCT_EXPORT_MODULE(FirestackDatabase);
     self = [super init];
     if (self != nil) {
         _dbReferences = [[NSMutableDictionary alloc] init];
+        _transactions = [[NSMutableDictionary alloc] init];
+        _transactionQueue = dispatch_queue_create("com.fullstackreact.react-native-firestack", DISPATCH_QUEUE_CONCURRENT);
     }
     return self;
 }
@@ -468,7 +472,81 @@ RCT_EXPORT_METHOD(push:(NSString *) path
     }
 }
 
+RCT_EXPORT_METHOD(beginTransaction:(NSString *) path
+                  withIdentifier:(NSString *) identifier
+                  applyLocally:(BOOL) applyLocally
+                  onComplete:(RCTResponseSenderBlock) onComplete)
+{
+    dispatch_async(_transactionQueue, ^{
+        NSMutableDictionary *transactionState = [NSMutableDictionary new];
+        
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        [transactionState setObject:sema forKey:@"semaphore"];
+        
+        FIRDatabaseReference *ref = [self getPathRef:path];
+        [ref runTransactionBlock:^FIRTransactionResult * _Nonnull(FIRMutableData * _Nonnull currentData) {
+            dispatch_barrier_async(_transactionQueue, ^{
+                [_transactions setValue:transactionState forKey:identifier];
+                [self sendEventWithName:DATABASE_TRANSACTION_EVENT
+                                   body:@{
+                                          @"id": identifier,
+                                          @"originalValue": currentData.value
+                                          }];
+            });
+            // Wait for the event handler to call tryCommitTransaction
+            dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+            BOOL abort = [transactionState valueForKey:@"abort"];
+            id value = [transactionState valueForKey:@"value"];
+            dispatch_barrier_async(_transactionQueue, ^{
+                [_transactions removeObjectForKey:identifier];
+            });
+            if (abort) {
+                return [FIRTransactionResult abort];
+            } else {
+                currentData.value = value;
+                return [FIRTransactionResult successWithValue:currentData];
+            }
+        } andCompletionBlock:^(NSError * _Nullable databaseError, BOOL committed, FIRDataSnapshot * _Nullable snapshot) {
+            if (databaseError != nil) {
+                NSDictionary *evt = @{
+                                      @"errorCode": [NSNumber numberWithInt:[databaseError code]],
+                                      @"errorDetails": [databaseError debugDescription],
+                                      @"description": [databaseError description]
+                                      };
+                onComplete(@[evt]);
+            } else {
+                onComplete(@[[NSNull null], @{
+                               @"committed": [NSNumber numberWithBool:committed],
+                               @"snapshot": [FirestackDBReference snapshotToDict:snapshot],
+                               @"status": @"success",
+                               @"method": @"transaction"
+                               }]);
+            }
+        } withLocalEvents:applyLocally];
+    });
+}
 
+RCT_EXPORT_METHOD(tryCommitTransaction:(NSString *) identifier
+                  withData:(NSDictionary *) data
+                  orAbort:(BOOL) abort)
+{
+    __block NSMutableDictionary *transactionState;
+    dispatch_sync(_transactionQueue, ^{
+        transactionState = [_transactions objectForKey: identifier];
+    });
+    if (!transactionState) {
+        NSLog(@"tryCommitTransaction for unknown ID %@", identifier);
+        return;
+    }
+    dispatch_semaphore_t sema = [transactionState valueForKey:@"semaphore"];
+    if (abort) {
+        [transactionState setValue:@true forKey:@"abort"];
+    } else {
+        id newValue = [data valueForKey:@"value"];
+        [transactionState setValue:newValue forKey:@"value"];
+    }
+    dispatch_semaphore_signal(sema);
+}
 
 RCT_EXPORT_METHOD(on:(NSString *) path
                   modifiersString:(NSString *) modifiersString
@@ -623,7 +701,7 @@ RCT_EXPORT_METHOD(goOnline)
 
 // Not sure how to get away from this... yet
 - (NSArray<NSString *> *)supportedEvents {
-    return @[DATABASE_DATA_EVENT, DATABASE_ERROR_EVENT];
+    return @[DATABASE_DATA_EVENT, DATABASE_ERROR_EVENT, DATABASE_TRANSACTION_EVENT];
 }
 
 
