@@ -43,6 +43,16 @@ firestack.database()
     const exists = snapshot.exists();
   });
 ```
+Basic write with priority example:
+```javascript
+firestack.database()
+  .ref('posts/1235')
+  .setWithPriority({
+    title: 'Another Awesome Post',
+    content: 'Some awesome content',
+  }, 10);
+```
+Useful for `orderByPriority` queries.
 
 
 ## Unmounted components
