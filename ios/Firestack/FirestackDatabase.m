@@ -137,6 +137,8 @@
     [dict setValue:snapshot.key forKey:@"key"];
     NSDictionary *val = snapshot.value;
     [dict setObject:val forKey:@"value"];
+    NSDictionary *exportValue = snapshot.valueInExportFormat;
+    [dict setObject:exportValue forKey:@"exportValue"];
     // Snapshot ordering
     NSMutableArray *childKeys = [NSMutableArray array];
     if (snapshot.childrenCount > 0) {
