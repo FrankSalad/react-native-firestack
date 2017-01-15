@@ -61,7 +61,8 @@
                                  @"eventName": eventName,
                                  @"path": [self absPath:[snapshot ref]],
                                  @"modifiersString": _modifiersString,
-                                 @"snapshot": props
+                                 @"snapshot": props,
+                                 @"handlePath": _path
                                  }];
         };
         id errorBlock = ^(NSError * _Nonnull error) {
